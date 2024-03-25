@@ -1,88 +1,61 @@
 import express from "express";
-import https from "https";
 import cors from "cors";
-import path from "path";
-import fs from "fs";
-import { networkInterfaces } from "os";
 import { v4 } from "uuid";
 import type { LogRequestBody, UIDPayload } from "./types";
+import WebSocket from "ws";
+import { loggingSocket } from "./loggingSocket";
+import { setCache } from "./state";
+import { setupServer } from "./setupServer";
 
 const app = express();
 const port = 8080;
 
-let loggingCache: Record<string, any> = {};
-
 app.use(cors());
 app.use(express.json());
 
-// give an example of how to pass the  required query aprams to the url
-// http://localhost:8080/?home=https://www.google.com
-app.get("/", (req, res) => {
-  // get redirect url from query params
-  const redirectUrl = req.query.home;
-
-  // send an html page with an a tag that redirects to the redirect url
+// move outside, use some templating
+// htmx ? <3
+app.get("/display", (req, res) => {
   res.send(`
       <html>
         <head>
           <script>
-            window.location.href = "${redirectUrl || "https://www.google.com"}";
+            const socket = new WebSocket("wss://" + window.location.host + "/api/");
+            socket.onopen = () => {
+              socket.send(JSON.stringify({ clientType: "logger" }));
+            };
+            socket.onmessage = (event) => {
+              document.body.innerHTML = event.data;
+            };
           </script>
         </head>
         <body>
-          <a href="${
-            redirectUrl || "https://www.google.com"
-          }">Click here to redirect</a>
+          <h1>Displaying logs</h1>
         </body>
       </html>
     `);
 });
 
-function printProgress(progress: any) {
-  const string = JSON.stringify(progress);
-  process.stdout.clearLine(0);
-  process.stdout.cursorTo(0);
-  process.stdout.write(string);
-}
-
-app.post("/api/uid", (req, res) => {
+// TODO: should be a get request
+app.get("/uid", (req, res) => {
   const newUUID = v4();
-  loggingCache[newUUID] = {};
+  setCache(newUUID);
   const response: UIDPayload = { UID: newUUID };
   res.send(response);
 });
 
-app.post("/api/log", (req, res) => {
+app.post("/log", (req, res) => {
   // payload will come under a 'log' key
   const { UID, log }: LogRequestBody = req.body;
   if (!UID) {
     return res.status(400).send("uid is required");
   }
-  loggingCache[UID] = { ...loggingCache[UID], ...log };
-
-  printProgress(loggingCache[UID]);
+  setCache(UID, log);
   res.sendStatus(200);
 });
 
-// setup
-const ipAddress = Object.values(networkInterfaces())
-  .flat()
-  .find((iface) => iface?.family === "IPv4" && !iface.internal)?.address;
+const { server, start } = setupServer(app, port);
 
-const serverAddress = `${ipAddress}:${port}`;
+loggingSocket(new WebSocket.Server({ server }));
 
-if (process.argv.includes("--ssl")) {
-  const options = {
-    key: fs.readFileSync(path.join(__dirname, "../certs", "key.pem")),
-    cert: fs.readFileSync(path.join(__dirname, "../certs", "cert.pem")),
-  };
-
-  const server = https.createServer(options, app);
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`Server is running at: https://${serverAddress}`);
-  });
-} else {
-  app.listen(port, "0.0.0.0", () => {
-    console.log(`Server is running at: http://${serverAddress}`);
-  });
-}
+start();
